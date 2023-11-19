@@ -165,7 +165,7 @@ impl RoleNode<Leader> {
             // until it's applied and the response is returned to the client.
             Event::ClientRequest { id, request: Request::Mutate(command) } => {
                 let index = self.propose(Some(command))?;
-                self.role.writes.insert(index, (msg.from.clone(), id.clone()));
+                self.role.writes.insert(index, (msg.from, id.clone()));
                 self.state_tx.send(Instruction::Notify { id, address: msg.from, index })?;
                 if self.peers.is_empty() {
                     self.maybe_commit()?;
