@@ -121,7 +121,7 @@ impl RoleNode<Follower> {
             // The leader will send periodic heartbeats. If we don't have a
             // leader in this term yet, follow it. If the commit_index advances,
             // apply state transitions.
-            Event::Heartbeat { commit_index, commit_term } => {
+            Event::Heartbeat { commit_index, commit_term, read_seq } => {
                 // Check that the heartbeat is from our leader.
                 let from = msg.from.unwrap();
                 match self.role.leader {
@@ -139,7 +139,10 @@ impl RoleNode<Follower> {
                         self.state_tx.send(Instruction::Apply { entry })?;
                     }
                 }
-                self.send(msg.from, Event::ConfirmLeader { commit_index, has_committed })?;
+                self.send(
+                    msg.from,
+                    Event::ConfirmLeader { commit_index, has_committed, read_seq },
+                )?;
             }
 
             // Replicate entries from the leader. If we don't have a leader in
@@ -311,7 +314,7 @@ pub mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 3,
-            event: Event::Heartbeat { commit_index: 3, commit_term: 2 },
+            event: Event::Heartbeat { commit_index: 3, commit_term: 2, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(3).leader(Some(2)).voted_for(None).committed(3);
         assert_messages(
@@ -320,7 +323,7 @@ pub mod tests {
                 from: Address::Node(1),
                 to: Address::Node(2),
                 term: 3,
-                event: Event::ConfirmLeader { commit_index: 3, has_committed: true },
+                event: Event::ConfirmLeader { commit_index: 3, has_committed: true, read_seq: 7 },
             }],
         );
         assert_messages(
@@ -340,7 +343,7 @@ pub mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 3,
-            event: Event::Heartbeat { commit_index: 3, commit_term: 3 },
+            event: Event::Heartbeat { commit_index: 3, commit_term: 3, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(3).leader(Some(2)).voted_for(None).committed(2);
         assert_messages(
@@ -349,7 +352,7 @@ pub mod tests {
                 from: Address::Node(1),
                 to: Address::Node(2),
                 term: 3,
-                event: Event::ConfirmLeader { commit_index: 3, has_committed: false },
+                event: Event::ConfirmLeader { commit_index: 3, has_committed: false, read_seq: 7 },
             }],
         );
         assert_messages(&mut state_rx, vec![]);
@@ -364,7 +367,7 @@ pub mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 3,
-            event: Event::Heartbeat { commit_index: 5, commit_term: 3 },
+            event: Event::Heartbeat { commit_index: 5, commit_term: 3, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(3).leader(Some(2)).voted_for(None).committed(2);
         assert_messages(
@@ -373,7 +376,7 @@ pub mod tests {
                 from: Address::Node(1),
                 to: Address::Node(2),
                 term: 3,
-                event: Event::ConfirmLeader { commit_index: 5, has_committed: false },
+                event: Event::ConfirmLeader { commit_index: 5, has_committed: false, read_seq: 7 },
             }],
         );
         assert_messages(&mut state_rx, vec![]);
@@ -390,7 +393,7 @@ pub mod tests {
                 from: Address::Node(3),
                 to: Address::Node(1),
                 term: 3,
-                event: Event::Heartbeat { commit_index: 5, commit_term: 3 },
+                event: Event::Heartbeat { commit_index: 5, commit_term: 3, read_seq: 7 },
             })
             .unwrap();
     }
@@ -404,7 +407,7 @@ pub mod tests {
             from: Address::Node(3),
             to: Address::Node(1),
             term: 3,
-            event: Event::Heartbeat { commit_index: 3, commit_term: 2 },
+            event: Event::Heartbeat { commit_index: 3, commit_term: 2, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(3).leader(Some(3)).voted_for(None).committed(3);
         assert_messages(
@@ -413,7 +416,7 @@ pub mod tests {
                 from: Address::Node(1),
                 to: Address::Node(3),
                 term: 3,
-                event: Event::ConfirmLeader { commit_index: 3, has_committed: true },
+                event: Event::ConfirmLeader { commit_index: 3, has_committed: true, read_seq: 7 },
             }],
         );
         assert_messages(
@@ -433,7 +436,7 @@ pub mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 3,
-            event: Event::Heartbeat { commit_index: 1, commit_term: 1 },
+            event: Event::Heartbeat { commit_index: 1, commit_term: 1, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(3).leader(Some(2)).voted_for(None).committed(2);
         assert_messages(
@@ -442,7 +445,7 @@ pub mod tests {
                 from: Address::Node(1),
                 to: Address::Node(2),
                 term: 3,
-                event: Event::ConfirmLeader { commit_index: 1, has_committed: true },
+                event: Event::ConfirmLeader { commit_index: 1, has_committed: true, read_seq: 7 },
             }],
         );
         assert_messages(&mut state_rx, vec![]);
@@ -457,7 +460,7 @@ pub mod tests {
             from: Address::Node(3),
             to: Address::Node(1),
             term: 4,
-            event: Event::Heartbeat { commit_index: 3, commit_term: 2 },
+            event: Event::Heartbeat { commit_index: 3, commit_term: 2, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(4).leader(Some(3)).voted_for(None);
         assert_messages(
@@ -466,7 +469,7 @@ pub mod tests {
                 from: Address::Node(1),
                 to: Address::Node(3),
                 term: 4,
-                event: Event::ConfirmLeader { commit_index: 3, has_committed: true },
+                event: Event::ConfirmLeader { commit_index: 3, has_committed: true, read_seq: 7 },
             }],
         );
         assert_messages(
@@ -486,7 +489,7 @@ pub mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 2,
-            event: Event::Heartbeat { commit_index: 3, commit_term: 2 },
+            event: Event::Heartbeat { commit_index: 3, commit_term: 2, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(3).leader(Some(2)).voted_for(None).committed(2);
         assert_messages(&mut node_rx, vec![]);
@@ -971,7 +974,7 @@ pub mod tests {
             from: Address::Node(3),
             to: Address::Node(1),
             term: 4,
-            event: Event::Heartbeat { commit_index: 3, commit_term: 2 },
+            event: Event::Heartbeat { commit_index: 3, commit_term: 2, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(4).leader(Some(3)).forwarded(vec![]);
         assert_messages(
@@ -987,7 +990,11 @@ pub mod tests {
                     from: Address::Node(1),
                     to: Address::Node(3),
                     term: 4,
-                    event: Event::ConfirmLeader { commit_index: 3, has_committed: true },
+                    event: Event::ConfirmLeader {
+                        commit_index: 3,
+                        has_committed: true,
+                        read_seq: 7,
+                    },
                 },
             ],
         );
@@ -1015,7 +1022,7 @@ pub mod tests {
                 from: Address::Node(2),
                 to: Address::Node(1),
                 term: 3,
-                event: Event::Heartbeat { commit_index: 2, commit_term: 1 },
+                event: Event::Heartbeat { commit_index: 2, commit_term: 1, read_seq: 7 },
             })?;
             assert_messages(
                 &mut node_rx,
@@ -1023,7 +1030,11 @@ pub mod tests {
                     from: Address::Node(1),
                     to: Address::Node(2),
                     term: 3,
-                    event: Event::ConfirmLeader { commit_index: 2, has_committed: true },
+                    event: Event::ConfirmLeader {
+                        commit_index: 2,
+                        has_committed: true,
+                        read_seq: 7,
+                    },
                 }],
             )
         }

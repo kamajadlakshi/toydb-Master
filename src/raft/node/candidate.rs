@@ -204,7 +204,7 @@ mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 3,
-            event: Event::Heartbeat { commit_index: 2, commit_term: 1 },
+            event: Event::Heartbeat { commit_index: 2, commit_term: 1, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(3);
         assert_messages(
@@ -213,7 +213,7 @@ mod tests {
                 from: Address::Node(1),
                 to: Address::Node(2),
                 term: 3,
-                event: Event::ConfirmLeader { commit_index: 2, has_committed: true },
+                event: Event::ConfirmLeader { commit_index: 2, has_committed: true, read_seq: 7 },
             }],
         );
         assert_messages(&mut state_rx, vec![]);
@@ -229,7 +229,7 @@ mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 4,
-            event: Event::Heartbeat { commit_index: 2, commit_term: 1 },
+            event: Event::Heartbeat { commit_index: 2, commit_term: 1, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(4);
         assert_messages(
@@ -238,7 +238,7 @@ mod tests {
                 from: Address::Node(1),
                 to: Address::Node(2),
                 term: 4,
-                event: Event::ConfirmLeader { commit_index: 2, has_committed: true },
+                event: Event::ConfirmLeader { commit_index: 2, has_committed: true, read_seq: 7 },
             }],
         );
         assert_messages(&mut state_rx, vec![]);
@@ -253,7 +253,7 @@ mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 2,
-            event: Event::Heartbeat { commit_index: 1, commit_term: 1 },
+            event: Event::Heartbeat { commit_index: 1, commit_term: 1, read_seq: 7 },
         })?;
         assert_node(&mut node).is_candidate().term(3);
         assert_messages(&mut node_rx, vec![]);
@@ -293,7 +293,7 @@ mod tests {
                 from: Address::Node(1),
                 to: Address::Broadcast,
                 term: 3,
-                event: Event::Heartbeat { commit_index: 2, commit_term: 1 },
+                event: Event::Heartbeat { commit_index: 2, commit_term: 1, read_seq: 0 },
             },
         );
 

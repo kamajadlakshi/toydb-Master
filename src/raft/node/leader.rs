@@ -1,9 +1,11 @@
-use super::super::{Address, Event, Index, Instruction, Message, Request, RequestID, Response};
+use super::super::{
+    Address, Event, Index, Instruction, Message, ReadSequence, Request, RequestID, Response,
+};
 use super::{Follower, Node, NodeID, RoleNode, Status, Term, Ticks, HEARTBEAT_INTERVAL};
 use crate::error::{Error, Result};
 
 use ::log::{debug, info};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Peer replication progress.
 #[derive(Debug)]
@@ -12,6 +14,8 @@ struct Progress {
     next: Index,
     /// The last index known to be replicated to the peer.
     last: Index,
+    /// The last read sequence number confirmed by the peer.
+    read_seq: ReadSequence,
 }
 
 // A leader serves requests and replicates the log to followers.
@@ -29,6 +33,18 @@ pub struct Leader {
     ///
     /// TODO: Actually return responses when applied.
     writes: HashMap<Index, (Address, RequestID)>,
+    /// Keeps track of pending read requests. To guarantee linearizability, read
+    /// requests are assigned a sequence number and registered here when
+    /// received, but only executed once a quorum of nodes have confirmed the
+    /// current leader by responding to heartbeats with the sequence number.
+    ///
+    /// If we lose leadership before the command is processed, all pending read
+    /// requests are aborted by returning Error::Abort.
+    reads: VecDeque<(ReadSequence, Address, RequestID, Vec<u8>)>,
+    /// The read sequence number used for the last read. Incremented for every
+    /// read command, and reset when we lose leadership (thus only valid for
+    /// this term).
+    read_seq: ReadSequence,
     /// Number of ticks since last periodic heartbeat.
     since_heartbeat: Ticks,
 }
@@ -37,8 +53,15 @@ impl Leader {
     /// Creates a new leader role.
     pub fn new(peers: HashSet<NodeID>, last_index: Index) -> Self {
         let next = last_index + 1;
-        let progress = peers.into_iter().map(|p| (p, Progress { next, last: 0 })).collect();
-        Self { progress, writes: HashMap::new(), since_heartbeat: 0 }
+        let progress =
+            peers.into_iter().map(|p| (p, Progress { next, last: 0, read_seq: 0 })).collect();
+        Self {
+            progress,
+            writes: HashMap::new(),
+            reads: VecDeque::new(),
+            read_seq: 0,
+            since_heartbeat: 0,
+        }
     }
 }
 
@@ -64,6 +87,9 @@ impl RoleNode<Leader> {
         // Cancel in-flight requests.
         self.state_tx.send(Instruction::Abort)?;
         for (address, id) in std::mem::take(&mut self.role.writes).into_values() {
+            self.send(address, Event::ClientResponse { id, response: Err(Error::Abort) })?;
+        }
+        for (_, address, id, _) in std::mem::take(&mut self.role.reads).into_iter() {
             self.send(address, Event::ClientResponse { id, response: Err(Error::Abort) })?;
         }
 
@@ -98,14 +124,28 @@ impl RoleNode<Leader> {
 
             // A follower received one of our heartbeats and confirms that we
             // are its leader. If it doesn't have the commit index in its local
-            // log, replicate the log to it.
-            Event::ConfirmLeader { commit_index, has_committed } => {
+            // log, replicate the log to it. If the peer's read sequence number
+            // increased, process any pending reads.
+            Event::ConfirmLeader { commit_index, has_committed, read_seq } => {
+                assert!(read_seq <= self.role.read_seq, "Future read sequence number");
+
                 let from = msg.from.unwrap();
                 self.state_tx.send(Instruction::Vote {
                     term: msg.term,
                     index: commit_index,
                     address: msg.from,
                 })?;
+
+                let mut read_seq_advanced = false;
+                self.role.progress.entry(from).and_modify(|p| {
+                    if read_seq > p.read_seq {
+                        p.read_seq = read_seq;
+                        read_seq_advanced = true;
+                    }
+                });
+                if read_seq_advanced {
+                    self.maybe_read()?;
+                }
                 if !has_committed {
                     self.send_log(from)?;
                 }
@@ -143,7 +183,18 @@ impl RoleNode<Leader> {
                 self.send_log(from)?;
             }
 
+            // A client submitted a read command. To ensure linearizability, we
+            // must confirm that we are still the leader by sending a heartbeat
+            // with the read's sequence number and wait for confirmation from a
+            // quorum before executing the read.
             Event::ClientRequest { id, request: Request::Query(command) } => {
+                self.role.read_seq += 1;
+                self.role.reads.push_back((
+                    self.role.read_seq,
+                    msg.from,
+                    id.clone(),
+                    command.clone(),
+                ));
                 let (commit_index, _) = self.log.get_commit_index();
                 self.state_tx.send(Instruction::Query {
                     id,
@@ -158,6 +209,9 @@ impl RoleNode<Leader> {
                     index: commit_index,
                     address: Address::Node(self.id),
                 })?;
+                if self.peers.is_empty() {
+                    self.maybe_read()?;
+                }
                 self.heartbeat()?;
             }
 
@@ -222,7 +276,8 @@ impl RoleNode<Leader> {
     /// Broadcasts a heartbeat to all peers.
     pub(super) fn heartbeat(&mut self) -> Result<()> {
         let (commit_index, commit_term) = self.log.get_commit_index();
-        self.send(Address::Broadcast, Event::Heartbeat { commit_index, commit_term })?;
+        let read_seq = self.role.read_seq;
+        self.send(Address::Broadcast, Event::Heartbeat { commit_index, commit_term, read_seq })?;
         // NB: We don't reset self.since_heartbeat here, because we want to send
         // periodic heartbeats regardless of any on-demand heartbeats.
         Ok(())
@@ -289,6 +344,33 @@ impl RoleNode<Leader> {
             }
         }
         Ok(commit_index)
+    }
+
+    /// Executes any pending read requests that are now ready after quorum
+    /// confirmation of their sequence number.
+    fn maybe_read(&mut self) -> Result<ReadSequence> {
+        // Determine the quorum-confirmed read sequence.
+        let mut read_seqs = self
+            .role
+            .progress
+            .values()
+            .map(|p| p.read_seq)
+            .chain(std::iter::once(self.role.read_seq))
+            .collect::<Vec<_>>();
+        read_seqs.sort_unstable();
+        read_seqs.reverse();
+        let read_seq = read_seqs[self.quorum() as usize - 1];
+
+        // Execute the ready reads.
+        while let Some((rs, _, _, _)) = self.role.reads.front() {
+            if *rs > read_seq {
+                break;
+            }
+            self.role.reads.pop_front().unwrap();
+            // TODO: Actually execute the reads.
+        }
+
+        Ok(read_seq)
     }
 
     /// Sends pending log entries to a peer.
@@ -358,7 +440,7 @@ mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 3,
-            event: Event::ConfirmLeader { commit_index: 2, has_committed: true },
+            event: Event::ConfirmLeader { commit_index: 2, has_committed: true, read_seq: 0 },
         })?;
         assert_node(&mut node).is_leader().term(3).committed(2);
         assert_messages(&mut node_rx, vec![]);
@@ -379,7 +461,7 @@ mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 3,
-            event: Event::ConfirmLeader { commit_index: 2, has_committed: false },
+            event: Event::ConfirmLeader { commit_index: 2, has_committed: false, read_seq: 0 },
         })?;
         assert_node(&mut node).is_leader().term(3).committed(2);
         assert_messages(
@@ -408,7 +490,7 @@ mod tests {
                 from: Address::Node(2),
                 to: Address::Node(1),
                 term: 3,
-                event: Event::Heartbeat { commit_index: 5, commit_term: 3 },
+                event: Event::Heartbeat { commit_index: 5, commit_term: 3, read_seq: 7 },
             })
             .unwrap();
     }
@@ -423,7 +505,7 @@ mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 4,
-            event: Event::Heartbeat { commit_index: 7, commit_term: 4 },
+            event: Event::Heartbeat { commit_index: 7, commit_term: 4, read_seq: 7 },
         })?;
         assert_node(&mut node).is_follower().term(4).leader(Some(2)).committed(2);
         assert_messages(
@@ -432,7 +514,7 @@ mod tests {
                 from: Address::Node(1),
                 to: Address::Node(2),
                 term: 4,
-                event: Event::ConfirmLeader { commit_index: 7, has_committed: false },
+                event: Event::ConfirmLeader { commit_index: 7, has_committed: false, read_seq: 7 },
             }],
         );
         assert_messages(&mut state_rx, vec![Instruction::Abort]);
@@ -449,7 +531,7 @@ mod tests {
             from: Address::Node(2),
             to: Address::Node(1),
             term: 2,
-            event: Event::Heartbeat { commit_index: 3, commit_term: 2 },
+            event: Event::Heartbeat { commit_index: 3, commit_term: 2, read_seq: 7 },
         })?;
         assert_node(&mut node).is_leader().term(3).committed(2);
         assert_messages(&mut node_rx, vec![]);
@@ -624,7 +706,7 @@ mod tests {
                 from: Address::Node(1),
                 to: Address::Broadcast,
                 term: 3,
-                event: Event::Heartbeat { commit_index: 2, commit_term: 1 },
+                event: Event::Heartbeat { commit_index: 2, commit_term: 1, read_seq: 1 },
             }],
         );
         assert_messages(
@@ -742,7 +824,7 @@ mod tests {
                     from: Address::Node(1),
                     to: Address::Broadcast,
                     term: 3,
-                    event: Event::Heartbeat { commit_index: 2, commit_term: 1 },
+                    event: Event::Heartbeat { commit_index: 2, commit_term: 1, read_seq: 0 },
                 }
             );
         }
