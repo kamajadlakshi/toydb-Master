@@ -1,6 +1,4 @@
-use super::super::{
-    Address, Event, Index, Instruction, Message, ReadSequence, Request, RequestID, Response,
-};
+use super::super::{Address, Event, Index, Instruction, Message, ReadSequence, Request, RequestID};
 use super::{Follower, Node, NodeID, RoleNode, Status, Term, Ticks, HEARTBEAT_INTERVAL};
 use crate::error::{Error, Result};
 
@@ -247,15 +245,12 @@ impl RoleNode<Leader> {
                 self.state_tx.send(Instruction::Status { id, address: msg.from, status })?
             }
 
-            Event::ClientResponse { id, mut response } => {
-                if let Ok(Response::Status(ref mut status)) = response {
-                    status.server = self.id;
-                }
-                self.send(Address::Client, Event::ClientResponse { id, response })?;
-            }
-
             // Votes can come in after we won the election, ignore them.
             Event::SolicitVote { .. } | Event::GrantVote => {}
+
+            // Leaders never proxy client requests, so we don't expect to see
+            // responses from other nodes.
+            Event::ClientResponse { .. } => panic!("Unexpected message {:?}", msg),
         }
 
         Ok(self.into())

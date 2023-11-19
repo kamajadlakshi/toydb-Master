@@ -2,7 +2,7 @@ use super::super::{Address, Event, Message};
 use super::{rand_election_timeout, Follower, Leader, Node, NodeID, RoleNode, Term, Ticks};
 use crate::error::{Error, Result};
 
-use ::log::{debug, info, warn};
+use ::log::{debug, info};
 use std::collections::HashSet;
 
 /// A candidate is campaigning to become a leader.
@@ -128,7 +128,7 @@ impl RoleNode<Candidate> {
             Event::ConfirmLeader { .. }
             | Event::AcceptEntries { .. }
             | Event::RejectEntries { .. }
-            | Event::ClientResponse { .. } => warn!("Received unexpected message {:?}", msg),
+            | Event::ClientResponse { .. } => panic!("Received unexpected message {:?}", msg),
         }
         Ok(self.into())
     }

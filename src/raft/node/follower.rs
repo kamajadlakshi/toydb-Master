@@ -2,7 +2,7 @@ use super::super::{Address, Event, Instruction, Message, RequestID, Response};
 use super::{rand_election_timeout, Candidate, Node, NodeID, RoleNode, Term, Ticks};
 use crate::error::{Error, Result};
 
-use ::log::{debug, error, info, warn};
+use ::log::{debug, info};
 use std::collections::HashSet;
 
 // A follower replicates state from a leader.
@@ -187,13 +187,14 @@ impl RoleNode<Follower> {
                 }
             }
 
+            // We may receive a vote after we lost an election and followed a
+            // different leader. Ignore it.
+            Event::GrantVote => {}
+
             // Forward client requests to the leader, or abort them if there is
             // none (the client must retry).
             Event::ClientRequest { ref id, .. } => {
-                if msg.from != Address::Client {
-                    error!("Received client request from non-client {:?}", msg.from);
-                    return Ok(self.into());
-                }
+                assert_eq!(msg.from, Address::Client, "Client request from non-client");
 
                 let id = id.clone();
                 if let Some(leader) = self.role.leader {
@@ -207,10 +208,7 @@ impl RoleNode<Follower> {
 
             // Returns client responses for forwarded requests.
             Event::ClientResponse { id, mut response } => {
-                if !self.is_leader(&msg.from) {
-                    error!("Received client response from non-leader {:?}", msg.from);
-                    return Ok(self.into());
-                }
+                assert!(self.is_leader(&msg.from), "Client response from non-leader");
 
                 // TODO: Get rid of this field, it should be returned at the RPC
                 // server level instead.
@@ -225,8 +223,7 @@ impl RoleNode<Follower> {
             // We're not a leader nor candidate in this term, so we shoudn't see these.
             Event::ConfirmLeader { .. }
             | Event::AcceptEntries { .. }
-            | Event::RejectEntries { .. }
-            | Event::GrantVote { .. } => warn!("Received unexpected message {:?}", msg),
+            | Event::RejectEntries { .. } => panic!("Received unexpected message {:?}", msg),
         };
         Ok(self.into())
     }
