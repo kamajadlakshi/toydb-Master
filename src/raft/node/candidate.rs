@@ -1,6 +1,7 @@
 use super::super::{Address, Event, Message};
 use super::{rand_election_timeout, Follower, Leader, Node, NodeID, RoleNode, Term, Ticks};
 use crate::error::{Error, Result};
+use crate::raft::Index;
 
 use ::log::{debug, info};
 use std::collections::HashSet;
@@ -144,6 +145,10 @@ impl RoleNode<Candidate> {
         Ok(self.into())
     }
 
+    pub(super) fn applied(&mut self, index: Index, result: Result<Vec<u8>>) -> Result<()> {
+        Ok(())
+    }
+
     /// Campaign for leadership by increasing the term, voting for ourself, and
     /// soliciting votes from all peers.
     pub(super) fn campaign(&mut self) -> Result<()> {
@@ -162,6 +167,7 @@ impl RoleNode<Candidate> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::state::tests::TestState;
     use super::super::super::{Entry, Instruction, Log, Request};
     use super::super::tests::{assert_messages, assert_node};
     use super::*;
@@ -176,7 +182,9 @@ mod tests {
     )> {
         let (node_tx, node_rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = mpsc::unbounded_channel();
+        let state = Box::new(TestState::new(0));
         let mut log = Log::new(Box::new(storage::engine::Memory::new()), false)?;
+
         log.append(1, Some(vec![0x01]))?;
         log.append(1, Some(vec![0x02]))?;
         log.append(2, Some(vec![0x03]))?;
@@ -188,8 +196,8 @@ mod tests {
             peers: HashSet::from([2, 3, 4, 5]),
             term: 3,
             log,
+            state,
             node_tx,
-            state_tx,
             role: Candidate::new(),
         };
         node.role.votes.insert(1);

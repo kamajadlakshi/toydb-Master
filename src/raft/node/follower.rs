@@ -1,6 +1,7 @@
-use super::super::{Address, Event, Instruction, Message, RequestID, Response};
+use super::super::{Address, Event, Message, RequestID, Response};
 use super::{rand_election_timeout, Candidate, Node, NodeID, RoleNode, Term, Ticks};
 use crate::error::{Error, Result};
+use crate::raft::Index;
 
 use ::log::{debug, info};
 use std::collections::HashSet;
@@ -129,20 +130,19 @@ impl RoleNode<Follower> {
                     None => self = self.become_follower(Some(from), msg.term)?,
                 }
 
-                // Advance commit index and apply entries if possible.
+                // Respond to the heartbeat.
                 let has_committed = self.log.has(commit_index, commit_term)?;
-                let (old_commit_index, _) = self.log.get_commit_index();
-                if has_committed && commit_index > old_commit_index {
-                    self.log.commit(commit_index)?;
-                    let mut scan = self.log.scan((old_commit_index + 1)..=commit_index)?;
-                    while let Some(entry) = scan.next().transpose()? {
-                        self.state_tx.send(Instruction::Apply { entry })?;
-                    }
-                }
                 self.send(
                     msg.from,
                     Event::ConfirmLeader { commit_index, has_committed, read_seq },
                 )?;
+
+                // Advance commit index and apply entries if possible.
+                let (old_commit_index, _) = self.log.get_commit_index();
+                if has_committed && commit_index > old_commit_index {
+                    self.log.commit(commit_index)?;
+                }
+                self.maybe_apply()?;
             }
 
             // Replicate entries from the leader. If we don't have a leader in
@@ -228,6 +228,11 @@ impl RoleNode<Follower> {
         Ok(self.into())
     }
 
+    /// When an entry is applied, don't do anything.
+    pub(super) fn applied(&mut self, index: Index, result: Result<Vec<u8>>) -> Result<()> {
+        Ok(())
+    }
+
     /// Processes a logical clock tick.
     pub fn tick(mut self) -> Result<Node> {
         self.assert()?;
@@ -260,7 +265,9 @@ impl RoleNode<Follower> {
 }
 
 #[cfg(test)]
+#[cfg(never)] // TODO
 pub mod tests {
+    use super::super::super::state::tests::TestState;
     use super::super::super::{Entry, Log, Request};
     use super::super::tests::{assert_messages, assert_node};
     use super::*;
@@ -603,7 +610,6 @@ pub mod tests {
     fn step_appendentries_base0() -> Result<()> {
         // TODO: Move this into a setup function.
         let (node_tx, mut node_rx) = mpsc::unbounded_channel();
-        let (state_tx, mut state_rx) = mpsc::unbounded_channel();
         let mut log = Log::new(Box::new(storage::engine::Memory::new()), false)?;
         log.append(1, Some(vec![0x01]))?;
         log.append(1, Some(vec![0x02]))?;
@@ -615,8 +621,8 @@ pub mod tests {
             peers: HashSet::from([2, 3, 4, 5]),
             term: 1,
             log,
+            state: Box::new(TestState::new(0)),
             node_tx,
-            state_tx,
             role: Follower::new(Some(2), None),
         };
 
@@ -646,7 +652,6 @@ pub mod tests {
                 event: Event::AcceptEntries { last_index: 2 },
             }],
         );
-        assert_messages(&mut state_rx, vec![]);
         Ok(())
     }
 

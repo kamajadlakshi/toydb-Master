@@ -2,8 +2,8 @@ mod candidate;
 mod follower;
 mod leader;
 
-use super::{Address, Driver, Event, Index, Instruction, Log, Message, State};
-use crate::error::Result;
+use super::{Address, Event, Index, Log, Message, State};
+use crate::error::{Error, Result};
 use candidate::Candidate;
 use follower::Follower;
 use leader::Leader;
@@ -61,24 +61,12 @@ impl Node {
         id: NodeID,
         peers: HashSet<NodeID>,
         mut log: Log,
-        mut state: Box<dyn State>,
+        state: Box<dyn State>,
         node_tx: mpsc::UnboundedSender<Message>,
     ) -> Result<Self> {
-        let (state_tx, state_rx) = mpsc::unbounded_channel();
-        let mut driver = Driver::new(id, state_rx, node_tx.clone());
-        driver.apply_log(&mut *state, &mut log)?;
-        tokio::spawn(driver.drive(state));
-
         let (term, voted_for) = log.get_term()?;
-        let mut node = RoleNode {
-            id,
-            peers,
-            term,
-            log,
-            node_tx,
-            state_tx,
-            role: Follower::new(None, voted_for),
-        };
+        let mut node =
+            RoleNode { id, peers, term, log, state, node_tx, role: Follower::new(None, voted_for) };
         if node.peers.is_empty() {
             info!("No peers specified, starting as leader");
             // If we didn't vote for ourself in the persisted term, bump the
@@ -147,8 +135,8 @@ pub struct RoleNode<R> {
     peers: HashSet<NodeID>,
     term: Term,
     log: Log,
+    state: Box<dyn State>,
     node_tx: mpsc::UnboundedSender<Message>,
-    state_tx: mpsc::UnboundedSender<Instruction>,
     role: R,
 }
 
@@ -160,10 +148,32 @@ impl<R> RoleNode<R> {
             peers: self.peers,
             term: self.term,
             log: self.log,
+            state: self.state,
             node_tx: self.node_tx,
-            state_tx: self.state_tx,
             role,
         }
+    }
+
+    /// Applies committed log entries to the state machine. Returns the applied
+    /// index if any new entries were advanced, or None if there were no new
+    /// entries to apply.
+    fn maybe_apply(&mut self) -> Result<Option<Index>> {
+        let applied_index = self.state.get_applied_index();
+        let (commit_index, _) = self.log.get_commit_index();
+        assert!(applied_index <= commit_index, "applied index above commit index");
+        if applied_index >= commit_index {
+            return Ok(None);
+        }
+
+        let mut scan = self.log.scan((applied_index + 1)..=commit_index)?;
+        while let Some(entry) = scan.next().transpose()? {
+            debug!("Applying {:?}", entry);
+            match self.state.apply(entry) {
+                Err(error @ Error::Internal(_)) => return Err(error),
+                result => self.role.applied(entry.index, result)?,
+            };
+        }
+        Ok(Some(self.state.get_applied_index()))
     }
 
     /// Returns the quorum size of the cluster.
@@ -385,15 +395,14 @@ mod tests {
         peers: Vec<NodeID>,
     ) -> Result<(RoleNode<()>, mpsc::UnboundedReceiver<Message>)> {
         let (node_tx, node_rx) = mpsc::unbounded_channel();
-        let (state_tx, _) = mpsc::unbounded_channel();
         let node = RoleNode {
             role: (),
             id: 1,
             peers: HashSet::from_iter(peers),
             term: 1,
             log: Log::new(Box::new(storage::engine::Memory::new()), false)?,
+            state: Box::new(TestState::new(0)),
             node_tx,
-            state_tx,
         };
         Ok((node, node_rx))
     }
